@@ -1,0 +1,43 @@
+# smart_cd - 智能目录导航 (C Shell 版本)
+# 用法: 把此文件内容直接添加到 ~/.cshrc 末尾
+#
+# 使用方式:
+#   cd a        -> cd 到推荐目录 a + ll + 智能推荐
+#   cd 1        -> cd 到当前目录第1个条目 + ll
+#   cd psc      -> 模糊匹配 + ll + 智能推荐
+#   cd -        -> 返回上一次目录 + ll + 智能推荐
+#   cd          -> cd 到 home + ll + 智能推荐
+#   cdd query   -> 模糊搜索目录并跳转
+#   ll          -> 带编号和颜色的目录列表
+#   sl          -> 显示推荐列表
+#   sr          -> 切换推荐显示
+#   so          -> 切换输出顺序 (目录先/推荐先)
+#   sc          -> 切换底部对齐输出
+
+setenv SMART_CD_SCRIPT "$HOME/.local/share/smart_cd/smart_cd.py"
+setenv SMART_CD_ENABLED 1
+setenv SMART_CD_SHOW_RECS 1
+setenv SMART_CD_BOTTOM_ALIGN 0
+setenv SMART_CD_RECS_FIRST 0
+
+# ll - 带编号和颜色的目录列表
+alias ll '~/.local/share/smart_cd/ll_num \!*'
+
+# 基本命令
+alias sl 'python3 $SMART_CD_SCRIPT --ll'
+# 切换函数 - csh 中需要用 setenv 设置环境变量
+alias sr 'if ($SMART_CD_SHOW_RECS) setenv SMART_CD_SHOW_RECS 0; if (! $SMART_CD_SHOW_RECS) setenv SMART_CD_SHOW_RECS 1; echo "推荐: $SMART_CD_SHOW_RECS"'
+alias sc 'if ($SMART_CD_BOTTOM_ALIGN) setenv SMART_CD_BOTTOM_ALIGN 0; if (! $SMART_CD_BOTTOM_ALIGN) setenv SMART_CD_BOTTOM_ALIGN 1; echo "底部对齐: $SMART_CD_BOTTOM_ALIGN"'
+alias so 'if ($SMART_CD_RECS_FIRST) setenv SMART_CD_RECS_FIRST 0; if (! $SMART_CD_RECS_FIRST) setenv SMART_CD_RECS_FIRST 1; echo "顺序: $SMART_CD_RECS_FIRST (0=目录先 1=推荐先)"'
+alias smart_cd_help 'python3 $SMART_CD_SCRIPT --help'
+
+# cd 增强 - 使用 eval 执行 wrapper 输出
+alias cd 'eval `~/.local/share/smart_cd/smart_cd_wrapper "\!*"`'
+
+# cdd - 模糊搜索目录跳转
+alias cdd 'eval `~/.local/share/smart_cd/cdd_wrapper "\!*"`'
+
+# daemon (已合并到 smart_cd.py)
+python3 $SMART_CD_SCRIPT --daemon status | grep -q "not running" && python3 $SMART_CD_SCRIPT --daemon start > /dev/null
+
+echo "smart_cd 已加载: cd, cdd, ll, sl, sr, so, sc"

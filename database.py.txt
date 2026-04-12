@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Smart CD - Database module."""
+
+import os
+import sqlite3
+from datetime import datetime
+from config import DATA_DIR, DB_PATH
+
+class Database:
+    def __init__(self, db_path=None):
+        self.db_path = db_path or DB_PATH
+        self._conn = None
+        self._ensure_tables()
+
+    def _ensure_tables(self):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS directory_visits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL,
+            timestamp REAL NOT NULL, weekday INTEGER NOT NULL, hour INTEGER NOT NULL,
+            session_id TEXT, prev_dir TEXT, is_final INTEGER DEFAULT 1, dwell_time REAL DEFAULT 0)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_visits_path ON directory_visits(path)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_visits_timestamp ON directory_visits(timestamp)")
+        conn.commit()
+        conn.close()
+
+    @property
+    def conn(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, timeout=30.0)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        return self._conn
+
+    def record_visit(self, path, timestamp, weekday, hour, session_id=None, prev_dir=None, is_final=True, dwell_time=0):
+        self.conn.cursor().execute("""INSERT INTO directory_visits
+            (path, timestamp, weekday, hour, session_id, prev_dir, is_final, dwell_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (path, timestamp, weekday, hour, session_id, prev_dir, int(is_final), dwell_time))
+        self.conn.commit()
+
+    def update_dwell_time(self, path, session_id, dwell_time):
+        self.conn.cursor().execute("""UPDATE directory_visits SET dwell_time = dwell_time + ?
+            WHERE path = ? AND session_id = ? AND is_final = 1 ORDER BY timestamp DESC LIMIT 1""",
+            (dwell_time, path, session_id))
+        self.conn.commit()
+
+    def get_path_stats(self, path):
+        row = self.conn.cursor().execute("""SELECT COUNT(*) as visit_count, MAX(timestamp) as last_visit,
+            SUM(dwell_time) as total_dwell_time FROM directory_visits WHERE path = ? AND is_final = 1""",
+            (path,)).fetchone()
+        return dict(row) if row and row['visit_count'] > 0 else {'visit_count': 0, 'last_visit': 0, 'total_dwell_time': 0}
+
+    def get_hour_distribution(self, path):
+        return [(r['hour'], r['count']) for r in self.conn.cursor().execute(
+            "SELECT hour, COUNT(*) as count FROM directory_visits WHERE path = ? AND is_final = 1 GROUP BY hour", (path,)).fetchall()]
+
+    def get_all_hour_distributions(self, paths):
+        if not paths: return {}
+        c = self.conn.cursor()
+        c.execute(f"SELECT path, hour, COUNT(*) as count FROM directory_visits WHERE path IN ({','.join('?'*len(paths))}) AND is_final = 1 GROUP BY path, hour", paths)
+        result = {}
+        for r in c.fetchall(): result.setdefault(r['path'], []).append((r['hour'], r['count']))
+        return result
+
+    def get_transitions_from(self, prev_dir):
+        rows = self.conn.cursor().execute("SELECT path, COUNT(*) as count FROM directory_visits WHERE prev_dir = ? AND is_final = 1 GROUP BY path", (prev_dir,)).fetchall()
+        total = sum(r['count'] for r in rows)
+        return {r['path']: r['count']/total for r in rows} if total > 0 else {}
+
+    def get_global_stats(self):
+        row = self.conn.cursor().execute("""SELECT COUNT(DISTINCT path) as total_paths,
+            MAX(visit_count) as max_visits, MAX(total_dwell) as max_dwell FROM
+            (SELECT path, COUNT(*) as visit_count, SUM(dwell_time) as total_dwell FROM directory_visits WHERE is_final = 1 GROUP BY path)""").fetchone()
+        return {'total_paths': row['total_paths'] or 0, 'max_visits': row['max_visits'] or 1, 'max_dwell': row['max_dwell'] or 1}
+
+    def get_candidates_for_prediction(self, limit=20):
+        return [dict(r) for r in self.conn.cursor().execute("""SELECT path, COUNT(*) as visit_count,
+            MAX(timestamp) as last_visit, SUM(dwell_time) as total_dwell_time FROM directory_visits
+            WHERE is_final = 1 GROUP BY path ORDER BY last_visit DESC LIMIT ?""", (limit,)).fetchall()]
+
+    def cleanup_old_records(self, days=90):
+        cutoff = datetime.now().timestamp() - days * 86400
+        self.conn.cursor().execute("DELETE FROM directory_visits WHERE timestamp < ?", (cutoff,))
+        self.conn.commit()
+
+    def close(self):
+        if self._conn: self._conn.close(); self._conn = None
+    def __enter__(self): return self
+    def __exit__(self, *_): self.close()

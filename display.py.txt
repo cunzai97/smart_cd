@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Smart CD - Display module."""
+
+import os
+import subprocess
+from config import HOME_DIR, get_color_config, get_display_config
+
+def make_color(code: str) -> str: return f"\033[{code}m"
+
+def format_dwell(hours: float) -> str:
+    if hours >= 1: return f"{hours:.1f}h"
+    elif hours > 0: return f"{hours*60:.0f}m"
+    return "-"
+
+def get_ll_prefix_width() -> int:
+    try:
+        result = subprocess.run(['ls', '-l', '.'], capture_output=True, text=True, timeout=1)
+        lines = result.stdout.strip().split('\n')
+        if len(lines) < 2: return 44
+        max_perms = max_links = max_user = max_group = max_size = max_month = 0
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) >= 6:
+                max_perms, max_links = max(max_perms, len(parts[0])), max(max_links, len(parts[1]))
+                max_user, max_group = max(max_user, len(parts[2])), max(max_group, len(parts[3]))
+                max_size, max_month = max(max_size, len(parts[4])), max(max_month, len(parts[5]))
+        return max_perms+1+max_links+1+max_user+1+max_group+1+max_size+1+max_month+1+2+1+5+2
+    except: return 44
+
+def get_terminal_width() -> int:
+    try: return os.get_terminal_size().columns
+    except: return 80
+
+def format_recommendations(recs):
+    colors = get_color_config()
+    C = {k: make_color(colors.get(k,'0;90')) for k in ['header','path','stats','letter']}
+    R = make_color('0')
+    w = get_terminal_width()
+    header = "智能推荐:"
+    # 中文显示宽度=2，英文=1，所以显示宽度需要单独计算
+    header_display_width = len(header) + len([c for c in header if ord(c) > 127])
+    left_len = (w - header_display_width) // 2
+    right_len = w - header_display_width - left_len
+    sep_line = '-' * left_len + f"{C['header']}{header}{R}" + '-' * right_len
+    bottom_sep = '-' * w
+    lines = [sep_line]
+    pw = get_ll_prefix_width()
+    for r in recs:
+        path = r['path'] if not r['path'].startswith(HOME_DIR) else "~" + r['path'][len(HOME_DIR):]
+        parts = [f"S{min(int(r.get('score',0)*100),99):02d}", f"F{min(int(r.get('frequency',0)*100),99):02d}",
+                 f"R{min(int(r.get('recency',0)*100),99):02d}", f"T{min(int(r.get('time_pattern',0)*100),99):02d}",
+                 f"Tr{min(int(r.get('transition',0)*100),99):02d}", f"D{min(int(r.get('dwell',0)*100),99):02d}",
+                 f"V{min(r.get('visit_count',0),99):02d}", f"H{format_dwell(r.get('dwell_hours',0))}"]
+        content = ' '.join(parts)
+        line = f"{C['stats']}{content}{' '*max(pw-len(content),1)}{R}{C['letter']}[{r['letter']}]{R} {C['path']}{path}{R}"
+        lines.append(line)
+    lines.append(bottom_sep)
+    return '\n'.join(lines)

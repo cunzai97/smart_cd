@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Smart CD - Daemon module."""
+
+import os
+import sys
+import time
+import signal
+from datetime import datetime
+from config import DATA_DIR, DAEMON_PID_FILE, DAEMON_LOG_FILE, get_timing_config
+from database import Database
+from tracker import get_terminal_directories
+
+_shutdown = False
+
+def read_pid() -> int:
+    with open(DAEMON_PID_FILE, 'r') as f: return int(f.read().strip())
+
+def is_running() -> bool:
+    if not os.path.exists(DAEMON_PID_FILE): return False
+    try: os.kill(read_pid(), 0); return True
+    except (FileNotFoundError, ValueError, OSError):
+        try: os.remove(DAEMON_PID_FILE)
+        except OSError: pass
+        return False
+
+def stop_daemon():
+    if not os.path.exists(DAEMON_PID_FILE): print("Daemon is not running"); return
+    try:
+        pid = read_pid()
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(10):
+            time.sleep(0.2)
+            try: os.kill(pid, 0)
+            except OSError: break
+        os.remove(DAEMON_PID_FILE)
+        print("Daemon stopped")
+    except (FileNotFoundError, ValueError, OSError) as e:
+        print(f"Error: {e}")
+        try: os.remove(DAEMON_PID_FILE)
+        except OSError: pass
+
+def signal_handler(signum, frame): global _shutdown; _shutdown = True
+
+def daemon_loop():
+    global _shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    timing = get_timing_config()
+    check_interval, min_dwell = timing.get('daemon_check_interval', 60), timing.get('min_dwell_seconds', 10)
+    db = Database()
+    dwell_tracker = {}
+    max_entries = 100
+    while not _shutdown:
+        try:
+            now = time.time()
+            terminal_dirs = get_terminal_directories()
+            for directory in terminal_dirs:
+                if directory not in dwell_tracker:
+                    if len(dwell_tracker) >= max_entries:
+                        oldest = min(dwell_tracker.items(), key=lambda x: x[1]['last_check'])
+                        del dwell_tracker[oldest[0]]
+                    dwell_tracker[directory] = {'accumulated': 0, 'last_check': now}
+                data = dwell_tracker[directory]
+                data['accumulated'] += now - data['last_check']
+                data['last_check'] = now
+                if data['accumulated'] >= min_dwell:
+                    db.update_dwell_time(directory, 'daemon', data['accumulated'])
+                    data['accumulated'] = 0
+            for directory in [d for d in dwell_tracker if d not in terminal_dirs]:
+                del dwell_tracker[directory]
+            time.sleep(check_interval)
+        except Exception as e:
+            with open(DAEMON_LOG_FILE, 'a') as f: f.write(f"{datetime.now()}: {e}\n")
+            time.sleep(check_interval)
+    db.close()
+
+def start_daemon():
+    if is_running(): print("Daemon is already running"); return
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        pid = os.fork()
+        if pid > 0:
+            with open(DAEMON_PID_FILE, 'w') as f: f.write(str(pid))
+            print(f"Daemon started (PID: {pid})")
+            return
+    except OSError as e: print(f"Failed: {e}"); return
+    os.chdir('/')
+    os.setsid()
+    with open('/dev/null', 'r') as devnull: os.dup2(devnull.fileno(), sys.stdin.fileno())
+    with open('/dev/null', 'w') as devnull:
+        os.dup2(devnull.fileno(), sys.stdout.fileno())
+        os.dup2(devnull.fileno(), sys.stderr.fileno())
+    daemon_loop()
+
+def daemon_main(action):
+    if action == 'start': start_daemon()
+    elif action == 'stop': stop_daemon()
+    else: print(f"Daemon {'running (PID: ' + str(read_pid()) + ')' if is_running() else 'not running'}")

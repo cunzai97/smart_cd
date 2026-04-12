@@ -1,0 +1,102 @@
+#!/bin/bash
+# smart_cd_wrapper - 输出 tcsh cd 命令
+# 用法: eval `smart_cd_wrapper <arg>`
+
+arg="$1"
+script="$HOME/.local/share/smart_cd/smart_cd.py"
+cmd_config="$HOME/.local/share/smart_cd/.cmd_config"
+
+# 读取命令配置
+CMD_CD="cd"
+CMD_CDD="cdd"
+[[ -f "$cmd_config" ]] && source "$cmd_config"
+
+# 转义路径中的特殊字符 (csh/tcsh 格式)
+escape_path_csh() {
+    local path="$1"
+    # 转义顺序很重要：先转义反斜杠，再转义其他
+    path="${path//\\/\\\\}"      # \ -> \\
+    path="${path//\"/\\\"}"      # " -> \"
+    path="${path//\$/\\\$}"      # $ -> \$
+    path="${path//\`/\\\`}"      # ` -> \`
+    echo "$path"
+}
+
+# 生成 chdir 命令的辅助函数
+build_chdir_cmd() {
+    local path="$1"
+    local escaped_path
+    escaped_path=$(escape_path_csh "$path")
+
+    local show_recs="${SMART_CD_SHOW_RECS:-1}"
+    local recs_first="${SMART_CD_RECS_FIRST:-0}"
+
+    # 基础命令：chdir + record
+    local cmd="chdir \"$escaped_path\" ; python3 \"$script\" --record \"\$cwd\""
+
+    # 如果关闭推荐显示，只执行 ll_num
+    if [[ "$show_recs" == "0" ]]; then
+        cmd="$cmd ; ~/.local/share/smart_cd/ll_num"
+    else
+        # 根据顺序决定先显示哪个
+        if [[ "$recs_first" == "1" ]]; then
+            cmd="$cmd ; python3 \"$script\" --ll ; ~/.local/share/smart_cd/ll_num"
+        else
+            cmd="$cmd ; ~/.local/share/smart_cd/ll_num ; python3 \"$script\" --ll"
+        fi
+    fi
+
+    echo "$cmd"
+}
+
+# --help
+if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+    echo "python3 \"$script\" --help"
+    exit 0
+fi
+
+# cd - 返回上一次目录
+if [[ "$arg" == "-" ]]; then
+    build_chdir_cmd "-"
+    exit 0
+fi
+
+# 空参数 -> home
+if [[ -z "$arg" ]]; then
+    build_chdir_cmd "$HOME"
+    exit 0
+fi
+
+# 解析参数
+path=$(python3 "$script" --resolve "$arg" 2>/dev/null)
+
+# 错误消息 -> 如果 cd 和 cdd 相同，尝试模糊搜索
+if [[ "$path" == "cd: No"* ]]; then
+    if [[ "$CMD_CD" == "$CMD_CDD" ]]; then
+        fuzzy_path=$(python3 "$script" --cdd "$arg" 2>/dev/null)
+        if [[ -n "$fuzzy_path" && "$fuzzy_path" != "cdd:"* && -d "$fuzzy_path" ]]; then
+            build_chdir_cmd "$fuzzy_path"
+            exit 0
+        fi
+    fi
+    echo "echo \"$path\""
+    exit 0
+fi
+
+# 目录 -> chdir
+if [[ -d "$path" ]]; then
+    build_chdir_cmd "$path"
+    exit 0
+fi
+
+# 文件 -> 编辑器
+if [[ -f "$path" ]]; then
+    local escaped_path
+    escaped_path=$(escape_path_csh "$path")
+    editor="${EDITOR:-gvim}"
+    echo "$editor \"$escaped_path\" > /dev/null &"
+    exit 0
+fi
+
+# 未知情况
+echo "echo \"cd: Unknown path '$path'\""

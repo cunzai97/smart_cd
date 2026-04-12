@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Smart CD - Configuration module."""
+
+import os
+import configparser
+
+# Paths
+XDG_DATA_HOME = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+DATA_DIR = os.path.join(XDG_DATA_HOME, "smart_cd")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.ini")
+DB_PATH = os.path.join(DATA_DIR, "smart_cd.db")
+DAEMON_PID_FILE = os.path.join(DATA_DIR, "daemon.pid")
+DAEMON_LOG_FILE = os.path.join(DATA_DIR, "daemon.log")
+HOME_DIR = os.path.expanduser("~")
+FILE_ACCESS_ERRORS = (FileNotFoundError, PermissionError, OSError)
+
+# Default configuration
+DEFAULTS = {
+    'display': {'recommendation_limit': '5', 'show_stats': 'true', 'recs_first': 'false'},
+    'colors': {'header': '1;36', 'path': '1;34', 'stats': '0;90', 'letter': '1;33'},
+    'editor': {'command': 'gvim', 'background': 'true'},
+    'timing': {'min_dwell_seconds': '10', 'daemon_check_interval': '60'},
+    'scoring': {
+        'frequency_weight': '0.30', 'recency_weight': '0.25',
+        'time_pattern_weight': '0.10', 'transition_weight': '0.15',
+        'dwell_weight': '0.20', 'half_life_days': '7', 'dwell_max_hours': '1.0',
+    },
+    'fuzzy': {'max_depth': '3', 'max_time_ms': '500'},
+}
+
+_config = None
+
+def load_config():
+    global _config
+    if _config is not None: return _config
+    _config = configparser.ConfigParser()
+    _config.read_dict(DEFAULTS)
+    if os.path.exists(CONFIG_FILE):
+        _config.read(CONFIG_FILE)
+        for sec in _config.sections():
+            for key in _config[sec]:
+                val = _config[sec][key]
+                if '#' in val: _config[sec][key] = val.split('#')[0].strip()
+    else:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        try:
+            with open(CONFIG_FILE, 'w') as f: _config.write(f)
+        except IOError: pass
+    return _config
+
+def get_display_config():
+    cfg = load_config()
+    return {'recommendation_limit': cfg['display'].getint('recommendation_limit'),
+            'show_stats': cfg['display'].getboolean('show_stats'),
+            'recs_first': cfg['display'].getboolean('recs_first')}
+
+def get_color_config(): return dict(load_config()['colors'])
+
+def get_editor_command():
+    return os.environ.get('EDITOR', os.environ.get('VISUAL', load_config()['editor'].get('command')))
+
+def get_timing_config():
+    cfg = load_config()
+    return {'min_dwell_seconds': cfg['timing'].getint('min_dwell_seconds'),
+            'daemon_check_interval': cfg['timing'].getint('daemon_check_interval')}
+
+def get_scoring_config(): return {k: load_config()['scoring'].getfloat(k) for k in load_config()['scoring']}
+
+def get_fuzzy_config():
+    cfg = load_config()
+    return {'max_depth': cfg['fuzzy'].getint('max_depth'), 'max_time_ms': cfg['fuzzy'].getint('max_time_ms')}
+
+def get_custom_commands():
+    cfg, cmds = load_config(), {}
+    if 'commands' in cfg:
+        for k, v in cfg['commands'].items():
+            if ':' in v: cmds[k] = (v.split(':', 1)[0].strip(), v.split(':', 1)[1].strip())
+            else: cmds[k] = (v.strip(), None)
+    return cmds

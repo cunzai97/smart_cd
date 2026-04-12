@@ -1,0 +1,56 @@
+#!/bin/bash
+# ll_num - 带编号和颜色的目录列表
+# 用法: ll_num [ls 参数]
+
+# 用 ls -l 获取列表
+output=$(command ls -l "$@" 2>/dev/null)
+
+# 检查是否有内容（排除 total 行）
+content=$(echo "$output" | awk 'NR > 1 && NF > 0')
+if [[ -z "$content" ]]; then
+    echo "(空目录)"
+    exit 0
+fi
+
+# 处理并显示
+echo "$output" | awk '
+NR == 1 { next }
+{
+    idx = NR - 1
+    perms[idx] = $1
+    links[idx] = $2
+    user[idx] = $3
+    group[idx] = $4
+    size[idx] = $5
+    month[idx] = $6
+    day[idx] = $7
+    time[idx] = $8
+    fname = ""
+    for (i = 9; i <= NF; i++) {
+        if (i > 9) fname = fname " "
+        fname = fname $i
+    }
+    names[idx] = fname
+    max_perms = (length($1) > max_perms) ? length($1) : max_perms
+    max_links = (length($2) > max_links) ? length($2) : max_links
+    max_user  = (length($3) > max_user)  ? length($3) : max_user
+    max_group = (length($4) > max_group) ? length($4) : max_group
+    max_size  = (length($5) > max_size)  ? length($5) : max_size
+    max_month = (length($6) > max_month) ? length($6) : max_month
+    total = idx
+}
+END {
+    for (i = 1; i <= total; i++) {
+        type = substr(perms[i], 1, 1)
+        p = perms[i]
+        if (type == "d") {
+            color = "\033[1;34m"
+        } else if (p ~ /x/) {
+            color = "\033[0;32m"
+        } else {
+            color = "\033[0;90m"
+        }
+        reset = "\033[0m"
+        printf "%-" max_perms "s %" max_links "s %-" max_user "s %-" max_group "s %" max_size "s %-" max_month "s %2s %5s  \033[1;36m[%d]\033[0m %s%s%s\n", perms[i], links[i], user[i], group[i], size[i], month[i], day[i], time[i], i, color, names[i], reset
+    }
+}'
