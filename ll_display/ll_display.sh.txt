@@ -1,0 +1,71 @@
+#!/bin/bash
+# ll_display - 带编号的目录列表
+# 用法: ll_display [ls_options]
+
+# 获取 ls -l 输出
+o=$(command ls -l "$@" 2>/dev/null)
+
+# 检查是否有内容（跳过第一行标题）
+c=$(echo "$o" | awk 'NR>1 && NF>0')
+[[ -z "$c" ]] && { echo "(空)"; exit 0; }
+
+# 格式化输出：带编号和颜色
+echo "$o" | awk '
+# 跳过第一行（ls -l 的标题行）
+NR == 1 { next }
+
+{
+    # 行号索引
+    i = NR - 1
+
+    # 解析各字段
+    p[i] = $1   # 权限 (permission)
+    l[i] = $2   # 链接数 (links)
+    u[i] = $3   # 用户 (user)
+    g[i] = $4   # 组 (group)
+    s[i] = $5   # 大小 (size)
+    m[i] = $6   # 月份 (month)
+    d[i] = $7   # 日期 (day)
+    t[i] = $8   # 时间 (time)
+
+    # 文件名（第9字段起，可能有空格）
+    f = ""
+    for (j = 9; j <= NF; j++) {
+        if (j > 9) f = f " "
+        f = f $j
+    }
+    n[i] = f
+
+    # 计算各字段最大宽度（用于对齐）
+    mp = (length($1) > mp) ? length($1) : mp  # 权限宽度
+    ml = (length($2) > ml) ? length($2) : ml  # 链接数宽度
+    mu = (length($3) > mu) ? length($3) : mu  # 用户宽度
+    mg = (length($4) > mg) ? length($4) : mg  # 组宽度
+    ms = (length($5) > ms) ? length($5) : ms  # 大小宽度
+    mm = (length($6) > mm) ? length($6) : mm  # 月份宽度
+
+    T = i  # 总行数
+}
+
+END {
+    # 按顺序输出每行
+    for (i = 1; i <= T; i++) {
+        # 根据文件类型设置颜色
+        tp = substr(p[i], 1, 1)   # 第一个字符：d=目录，-=文件
+        pp = p[i]                 # 完整权限
+
+        if (tp == "d") {
+            cl = "\033[1;34m"     # 目录：蓝色
+        } else if (pp ~ /x/) {
+            cl = "\033[0;32m"     # 可执行：绿色
+        } else {
+            cl = "\033[0;90m"     # 其他：灰色
+        }
+
+        # 格式化输出
+        # 格式：权限 链接数 用户 组 大小 月份 日期 时间 [编号] 文件名
+        printf "%-" mp "s %" ml "s %-" mu "s %-" mg "s %" ms "s %-" mm "s %2s %5s  \033[1;36m[%d]\033[0m %s%s\033[0m\n",
+               p[i], l[i], u[i], g[i], s[i], m[i], d[i], t[i], i, cl, n[i]
+    }
+}
+'

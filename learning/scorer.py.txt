@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Smart CD Faster - Scorer module."""
+
+import time
+import math
+
+# 预计算时间距离权重表
+TIME_WEIGHTS = [math.exp(-(d**2)/8) for d in range(25)]
+
+class PathScore:
+    def __init__(self, path, total, frequency, recency, time_pattern, transition, dwell, visit_count, dwell_time):
+        self.path = path
+        self.total = total
+        self.frequency = frequency
+        self.recency = recency
+        self.time_pattern = time_pattern
+        self.transition = transition
+        self.dwell = dwell
+        self.visit_count = visit_count
+        self.dwell_time = dwell_time
+
+class Scorer:
+    def __init__(self, weights=None):
+        self.freq_w = weights.get('frequency_weight', 0.30) if weights else 0.30
+        self.rec_w = weights.get('recency_weight', 0.25) if weights else 0.25
+        self.time_w = weights.get('time_pattern_weight', 0.10) if weights else 0.10
+        self.trans_w = weights.get('transition_weight', 0.15) if weights else 0.15
+        self.dwell_w = weights.get('dwell_weight', 0.20) if weights else 0.20
+        self.half_life = weights.get('half_life_days', 7) if weights else 7
+        self.dwell_max = weights.get('dwell_max_hours', 1.0) if weights else 1.0
+
+    def score_path(self, visit_count, last_visit, dwell_time, hour_dist, current_hour, max_visits, max_dwell, path, transitions):
+        # 频率分数（log归一化）
+        freq = math.log(visit_count + 1) / math.log(max(max_visits, 1) + 1) if visit_count else 0
+
+        # 最近访问分数（半衰期衰减）
+        days_ago = (time.time() - last_visit) / 86400 if last_visit > 0 else 0
+        recent = 0.5 ** (days_ago / self.half_life)
+
+        # 时间规律分数
+        if hour_dist:
+            total_weight = sum(TIME_WEIGHTS[min(abs(h - current_hour), 24 - abs(h - current_hour))] * c for h, c in hour_dist)
+            total_count = sum(c for _, c in hour_dist)
+            time_pat = total_weight / total_count if total_count > 0 else 0
+        else:
+            time_pat = 0
+
+        # 转移概率
+        trans = transitions.get(path, 0)
+
+        # 停留时间分数
+        dwell = min(dwell_time / 3600 / self.dwell_max, 1)
+
+        # 综合评分
+        total = self.freq_w * freq + self.rec_w * recent + self.time_w * time_pat + self.trans_w * trans + self.dwell_w * dwell
+
+        return PathScore(path, total, freq, recent, time_pat, trans, dwell, visit_count, dwell_time)
+
+    def rank_paths(self, candidates, transitions, current_hour, max_visits, max_dwell):
+        scores = [self.score_path(c.get('visit_count',0), c.get('last_visit',0), c.get('total_dwell_time',0), c.get('hour_distribution',[]), current_hour, max_visits, max_dwell, c['path'], transitions) for c in candidates]
+        scores.sort(key=lambda s: s.total, reverse=True)
+        return scores

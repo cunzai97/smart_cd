@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Smart CD Faster - Adaptive Learning module.
+
+学习触发条件：
+1. 选择排名 > rank_threshold (默认3，即d之后)
+2. 选中项评分与首选差距 > score_gap_threshold (默认0.2)
+3. 满足 min_samples 和 update_interval
+
+稳定性约束：
+- 单因子权重变化 ≤ max_change (默认1%)
+"""
+
+import json
+from database import Database
+from config import WEIGHTS_FILE
+
+WEIGHT_NAMES = ['frequency_weight', 'recency_weight', 'time_pattern_weight', 'transition_weight', 'dwell_weight']
+DEFAULT_WEIGHTS = {'frequency_weight': 0.30, 'recency_weight': 0.25, 'time_pattern_weight': 0.10, 'transition_weight': 0.15, 'dwell_weight': 0.20}
+
+class Learner:
+    def __init__(self, db=None):
+        self.db = db or Database()
+        self.weights = self._load_weights()
+
+        # 学习参数
+        self.lr = 0.02                    # 学习率（每次权重调整幅度）
+        self.rank_threshold = 3           # 排名阈值：超过此排名才考虑学习
+        self.score_gap_threshold = 0.2    # 评分差距阈值
+        self.max_change = 0.01            # 单因子权重变化上限：1%
+        self.min_samples = 4              # 最少选择次数才开始学习
+        self.update_interval = 2          # 每多少次选择触发一次学习
+
+    def _load_weights(self):
+        try:
+            with open(WEIGHTS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return DEFAULT_WEIGHTS.copy()
+
+    def _save_weights(self):
+        with open(WEIGHTS_FILE, 'w') as f:
+            json.dump(self.weights, f)
+
+    def should_learn(self, selected, items):
+        """判断是否应该触发学习
+
+        Args:
+            selected: 用户选择的推荐项（包含rank, score等）
+            items: 所有推荐项列表
+
+        Returns:
+            bool: 是否触发学习
+        """
+        # 排名太靠前，不学习（用户选择了正常的推荐）
+        rank = selected.get('rank', 0)
+        if rank <= self.rank_threshold:
+            return False
+
+        # 计算选中项与首选的评分差距
+        selected_score = selected.get('score', 0)
+        top_score = items[0].get('score', 1.0) if items else 1.0
+        gap = top_score - selected_score
+
+        # 差距不够大，不学习（用户可能只是偏好这个路径）
+        if gap < self.score_gap_threshold:
+            return False
+
+        return True
+
+    def record_selection(self, session_uuid, letter):
+        """记录用户选择并触发学习"""
+        session_data, items = self.db.get_session_and_items(session_uuid)
+        if not session_data or not items:
+            return
+
+        self.db.mark_selected(session_uuid, letter)
+
+        selected = None
+        for item in items:
+            if item['letter'] == letter:
+                selected = item
+                break
+
+        if not selected:
+            return
+
+        # 检查是否满足学习触发条件
+        selections_count = self.db.get_selection_count()
+        if selections_count < self.min_samples or selections_count % self.update_interval != 0:
+            return
+
+        # 新的触发条件判断
+        if not self.should_learn(selected, items):
+            return
+
+        # 取排名靠前的项作为对比基准（排除选中项）
+        top_items = [item for item in items[:4] if item['letter'] != letter]
+        if not top_items:
+            return
+
+        self._learn(selected, top_items, selections_count)
+
+    def _learn(self, selected, top_items, selections_count):
+        """执行权重学习
+
+        Args:
+            selected: 用户选择的推荐项
+            top_items: 排名靠前的推荐项（作为对比基准）
+            selections_count: 总选择次数
+        """
+        # 提取因子值
+        f_selected = [
+            selected.get('f_freq', 0),
+            selected.get('f_rec', 0),
+            selected.get('f_time', 0),
+            selected.get('f_trans', 0),
+            selected.get('f_dwell', 0)
+        ]
+
+        # 计算排名靠前项的平均因子值
+        factor_keys = ['f_freq', 'f_rec', 'f_time', 'f_trans', 'f_dwell']
+        f_top_avg = [
+            sum(item.get(k, 0) for item in top_items) / len(top_items)
+            for k in factor_keys
+        ]
+
+        # 计算评分差距
+        score_selected = sum(self.weights.get(w, 0) * f for w, f in zip(WEIGHT_NAMES, f_selected))
+        score_top_avg = sum(self.weights.get(w, 0) * f for w, f in zip(WEIGHT_NAMES, f_top_avg))
+
+        # 计算梯度：选中项因子 - 首选项平均因子
+        gradient = [fs - ft for fs, ft in zip(f_selected, f_top_avg)]
+
+        # 学习率衰减
+        lr = self.lr / (1 + 0.001 * selections_count)
+
+        # 更新权重（带稳定性约束）
+        for i, w_name in enumerate(WEIGHT_NAMES):
+            delta = gradient[i] * lr
+
+            # 强制限制单因子变化不超过1%
+            delta = max(min(delta, self.max_change), -self.max_change)
+
+            # 更新权重，保持最小值
+            new_weight = self.weights.get(w_name, DEFAULT_WEIGHTS.get(w_name, 0.1)) + delta
+            self.weights[w_name] = max(0.01, new_weight)
+
+        # 归一化（保持总和为1）
+        total = sum(self.weights.values())
+        if total > 0:
+            for w in self.weights:
+                self.weights[w] /= total
+
+        self._save_weights()
+
+    def get_status(self):
+        """获取学习状态"""
+        stats = self.db.get_learning_stats()
+        return {
+            'selections_count': stats['total_selections'],
+            'current_weights': self.weights,
+            'config': {
+                'rank_threshold': self.rank_threshold,
+                'score_gap_threshold': self.score_gap_threshold,
+                'max_change': self.max_change
+            }
+        }
+
+    def reset_weights(self):
+        """重置权重为默认值"""
+        self.weights = DEFAULT_WEIGHTS.copy()
+        self._save_weights()
+
+    def close(self):
+        self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()

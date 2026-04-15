@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Smart CD Faster - Predictor module."""
+
+import os
+import uuid
+import json
+from datetime import datetime
+from database import Database
+from scorer import Scorer
+from config import get_display_config, is_excluded, is_recommendation_enabled, DATA_DIR, CACHE_FILE, normalize_path
+
+LETTERS = 'abcdefghijklmnopqrstuvwxyz'
+HOME_DIR = os.path.expanduser('~')
+
+class Predictor:
+    def __init__(self, db=None):
+        self.db = db or Database()
+        self.scorer = Scorer()
+
+    def predict(self, current_dir, limit=5, prev_dir=None):
+        display = get_display_config()
+
+        # 如果禁用，返回空列表
+        if not display['enabled']:
+            return []
+
+        limit = min(limit, display['limit'], len(LETTERS))
+
+        # 规范化当前目录
+        current_dir = normalize_path(current_dir)
+
+        candidates, max_visits, max_dwell = self.db.get_prediction_data(limit * 3)
+        if not candidates:
+            return []
+        transitions = self.db.get_second_order_transitions(prev_dir, current_dir)
+        scores = self.scorer.rank_paths(candidates, transitions, datetime.now().hour, max_visits, max_dwell)
+
+        result = []
+        for s in scores:
+            original_path = s.path
+
+            # 跳过原始路径包含 .. 的（数据库脏数据）
+            if '..' in original_path:
+                continue
+
+            # 规范化路径
+            path = normalize_path(original_path)
+
+            # 跳过无效路径
+            if path == current_dir or path == HOME_DIR:
+                continue
+            if not os.path.isdir(path):
+                continue
+            if is_excluded(path):
+                continue
+
+            # 更新 score 对象的路径
+            s.path = path
+            result.append(s)
+            if len(result) >= limit:
+                break
+        return result
+
+    def generate_recommendations(self, current_dir, prev_dir=None, limit=None):
+        display = get_display_config()
+        
+        # 如果禁用，不生成
+        if not display['enabled']:
+            return None, []
+        
+        if limit is None:
+            limit = display['limit']
+        
+        scores = self.predict(current_dir, limit, prev_dir)
+        session_uuid = str(uuid.uuid4())[:8]
+
+        session_id = self.db.create_recommendation_session(current_dir, prev_dir, session_uuid)
+
+        result = []
+        for i, s in enumerate(scores):
+            if i >= len(LETTERS):
+                break
+            result.append({
+                'letter': LETTERS[i],
+                'path': s.path,
+                'visit_count': s.visit_count,
+                'dwell_hours': s.dwell_time / 3600,
+                'score': round(s.total, 3),
+            })
+            if session_id:
+                self.db.add_recommendation_item(session_id, LETTERS[i], s.path, i, {
+                    'f_freq': s.frequency, 'f_rec': s.recency, 'f_time': s.time_pattern,
+                    'f_trans': s.transition, 'f_dwell': s.dwell
+                })
+
+        if session_id:
+            self.db.commit()
+
+        self._write_cache(current_dir, prev_dir, session_uuid, result)
+        return session_uuid, result
+
+    def _write_cache(self, current_dir, prev_dir, session_uuid, recommendations):
+        """写入推荐缓存（JSON格式）"""
+        os.makedirs(DATA_DIR, exist_ok=True)
+        cache_data = {
+            'current_dir': current_dir,
+            'prev_dir': prev_dir,
+            'session_uuid': session_uuid,
+            'recommendations': recommendations
+        }
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(cache_data, f)
+
+    def get_path_by_letter(self, current_dir, letter, prev_dir=None):
+        if len(letter) != 1 or not letter.isalpha():
+            return None
+        idx = ord(letter.lower()) - ord('a')
+        if idx < 0 or idx >= len(LETTERS):
+            return None
+
+        # 检查是否启用
+        if not is_recommendation_enabled():
+            return None
+
+        cache = self._read_cache(current_dir, prev_dir)
+        if cache and idx < len(cache['recommendations']):
+            return cache['recommendations'][idx]['path']
+
+        scores = self.predict(current_dir, len(LETTERS), prev_dir)
+        if idx < len(scores):
+            return scores[idx].path
+        return None
+
+    def _read_cache(self, current_dir, prev_dir=None):
+        """读取推荐缓存"""
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                data = json.load(f)
+            if data.get('current_dir') == current_dir:
+                return data
+        except:
+            pass
+        return None
+
+    def close(self):
+        self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+def get_cached_recommendations():
+    """读取推荐缓存"""
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return None

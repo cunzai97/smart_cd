@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Smart CD Faster - Configuration module."""
+
+import os
+from configparser import ConfigParser
+
+# 统一的路径常量（所有模块从这里导入）
+DATA_DIR = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share/smart_cd'))
+CONFIG_FILE = os.path.join(DATA_DIR, 'config.ini')
+DB_PATH = os.path.join(DATA_DIR, 'smart_cd.db')
+CACHE_FILE = os.path.join(DATA_DIR, '.rec_cache')
+WEIGHTS_FILE = os.path.join(DATA_DIR, 'weights.json')
+
+# ANSI 颜色映射
+COLORS = {
+    'yellow': '\033[1;33m',
+    'red': '\033[1;31m',
+    'green': '\033[0;32m',
+    'blue': '\033[1;34m',
+    'cyan': '\033[1;36m',
+    'magenta': '\033[1;35m',
+    'gray': '\033[0;90m',
+    'default': '\033[0m',
+}
+
+def normalize_path(path):
+    """路径规范化（统一入口）"""
+    return os.path.normpath(os.path.abspath(path))
+
+# 模块级配置缓存
+_cached_config = None
+
+def get_config():
+    """读取配置文件（带缓存）"""
+    global _cached_config
+    if _cached_config is not None:
+        return _cached_config
+    cfg = ConfigParser()
+    if os.path.exists(CONFIG_FILE):
+        cfg.read(CONFIG_FILE)
+    _cached_config = cfg
+    return cfg
+
+def get_display_config():
+    """获取显示配置"""
+    cfg = get_config()
+    limit = cfg.getint('display', 'recommendation_limit', fallback=5)
+    return {
+        'limit': max(0, min(limit, 26)),  # 0-26，0表示禁用
+        'letter_format': cfg.get('display', 'letter_format', fallback='[a]'),
+        'letter_color': cfg.get('display', 'letter_color', fallback='yellow'),
+        'path_color': cfg.get('display', 'path_color', fallback='default'),
+        'show_stats': cfg.getboolean('display', 'show_stats', fallback=True),
+        'enabled': limit > 0,  # limit=0 时禁用
+    }
+
+def get_exclude_paths():
+    """获取排除目录列表"""
+    cfg = get_config()
+    paths_str = cfg.get('exclude', 'paths', fallback='')
+    patterns_str = cfg.get('exclude', 'patterns', fallback='')
+    
+    paths = [p.strip() for p in paths_str.split(',') if p.strip()]
+    paths = [os.path.expanduser(os.path.expandvars(p)) for p in paths]
+    
+    patterns = [p.strip() for p in patterns_str.split(',') if p.strip()]
+    
+    return paths, patterns
+
+def get_color_code(color_name):
+    """获取 ANSI 颜色代码"""
+    return COLORS.get(color_name.lower(), COLORS['default'])
+
+def is_excluded(path):
+    """检查路径是否被排除"""
+    exclude_paths, patterns = get_exclude_paths()
+    
+    for ep in exclude_paths:
+        if path == ep or path.startswith(ep + '/'):
+            return True
+    
+    for pattern in patterns:
+        if pattern in path:
+            return True
+    
+    return False
+
+def is_recommendation_enabled():
+    """检查推荐功能是否启用"""
+    display = get_display_config()
+    return display['enabled']
+
+def save_config(section, key, value):
+    """保存配置项"""
+    global _cached_config
+    cfg = _cached_config or get_config()
+    if not cfg.has_section(section):
+        cfg.add_section(section)
+    cfg.set(section, key, str(value))
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        cfg.write(f)
+    # 更新缓存
+    _cached_config = cfg
+
+def print_config():
+    """打印当前配置"""
+    display = get_display_config()
+    exclude_paths, patterns = get_exclude_paths()
+
+    green = COLORS['green']
+    red = COLORS['red']
+
+    print("\033[1;36m=== 推荐配置 ===\033[0m")
+    status = f"{green}启用{COLORS['default']}" if display['enabled'] else f"{red}禁用{COLORS['default']}"
+    print(f"  启用状态: {status}")
+    print(f"  显示行数: {display['limit']}")
+    print(f"  字母格式: {display['letter_format']}")
+    print(f"  字母颜色: {display['letter_color']}")
+    print(f"  路径颜色: {display['path_color']}")
+    print(f"  显示统计: {display['show_stats']}")
+    print(f"  排除目录: {exclude_paths}")
+    print(f"  排除模式: {patterns}")
+    
+    if not display['enabled']:
+        print("\n\033[0;90m提示: 设置 recommendation_limit > 0 以启用推荐\033[0m")

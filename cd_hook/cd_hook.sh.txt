@@ -1,0 +1,30 @@
+#!/bin/bash
+# cd_hook - cd 后后台处理（非阻塞）
+# 用法: cd_hook <new_path> <prev_path> [letter]
+# 配置: MIN_DWELL_SECONDS 环境变量可覆盖最小停留阈值（默认5秒）
+
+NEW_PATH="$1"
+PREV_PATH="$2"
+LETTER="$3"
+NOW=$(date +%s)
+MIN_DWELL="${MIN_DWELL_SECONDS:-5}"  # 最小停留秒数，默认5秒
+
+# 记录前一目录的完整访问信息（仅停留超过阈值的才记录）
+# 包含：访问时间、来源目录、停留时长
+if [[ -n "$LAST_CD_PATH" && -n "$LAST_CD_TIME" ]]; then
+    DWELL=$((NOW - LAST_CD_TIME))
+    if [[ "$DWELL" -ge "$MIN_DWELL" ]]; then
+        # --record-visit 同时记录访问和停留时间
+        (python3 "__SMART_CD_PY__" --record-visit "$LAST_CD_PATH" "$PREV_PATH" "$DWELL" >/dev/null 2>&1 &)
+    fi
+fi
+
+# 仅生成推荐缓存（不记录新目录访问，等离开时再记录）
+if [[ -n "$NEW_PATH" && -d "$NEW_PATH" ]]; then
+    (python3 "__SMART_CD_PY__" --gen "$NEW_PATH" "$PREV_PATH" >/dev/null 2>&1 &)
+fi
+
+# 记录字母选择（用于学习）
+if [[ -n "$LETTER" && "$LETTER" =~ ^[a-z]$ ]]; then
+    (python3 "__SMART_CD_PY__" --select "$LETTER" >/dev/null 2>&1 &)
+fi
